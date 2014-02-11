@@ -86,24 +86,31 @@ class ArtefactTypeBrowseSkillshare extends ArtefactType {
         $contents = array();
         $wwwroot = get_config('wwwroot');
 
-        $selectclause = 'SELECT a.id, a.owner, s.*';
-        $fromclause =   'FROM {artefact} a, {artefact_skillshare} s, {artefact_tag} t'; 
-        $andclause =    "AND a.artefacttype = 'skillshare'
-                         AND s.publishskills = 1";
+        /*
+         * Example query
+        SELECT a.id, a.owner, a.mtime, s.artefact, s.statement, s.offered, s.wanted, s.statementtitle, s.externalwebsite, s.externalwebsiterole, s.publishskills
+        FROM artefact a
+        JOIN artefact_skillshare s ON a.id = s.artefact
+        WHERE s.publishskills = 1
+        GROUP BY a.id
+        ORDER BY a.mtime DESC
+        LIMIT 10 
+         */
+        $selectclause =     'SELECT a.id, a.owner, a.mtime, s.artefact, s.statement, s.offered, s.wanted, s.statementtitle, s.externalwebsite, s.externalwebsiterole, s.publishskills';
+        $fromclause =       ' FROM {artefact} a';
+        $joinclause =       ' JOIN {artefact_skillshare} s ON a.id = s.artefact';
+        $join2clause =      '';
+        $whereclause =      " WHERE a.artefacttype = 'skillshare'";
+        $andclause =        ' AND s.publishskills = 1';
 
         $onetimeclause = false;
 
         foreach ($filters as $filterkey => $filterval){
             
-            if (($filterkey == 'course' || $filterkey == 'college') && !empty($filterval) && !$onetimeclause){
-                $fromclause .= ", {usr_enrolment} e";
-                $selectclause .= ', e.college, e.course';
-                $onetimeclause = true;
-            }
-            
             switch ($filterkey){
 
                 case 'keyword':
+                    $join2clause = ' LEFT OUTER JOIN {artefact_tag} t ON t.artefact = a.id';
                     $keywords = explode(",", $filterval);
                     if (count($keywords) == 1 ){
                         $andclause .= " AND (
@@ -144,12 +151,19 @@ class ArtefactTypeBrowseSkillshare extends ArtefactType {
                     }
                     break;
                 case 'college' :
-                    $andclause .= " AND (e.college IN ($filterval) AND e.usr = a.owner)";
-                    break;
-                case 'yearofstudy' :
-                    $andclause .= " AND s.yearofstudy IN ($filterval)";
+                    if (!empty($filterval) && !$onetimeclause) {
+                        $join2clause .= ' JOIN {usr_enrolment} e ON e.usr = a.owner';
+                        $selectclause .= ', e.college, e.course';
+                        $ontimeclause = true;
+                    }
+                    $andclause .= " AND e.college IN ($filterval)";
                     break;
                 case 'course' :
+                    if (!empty($filterval) && !$onetimeclause) {
+                        $join2clause .= ' JOIN {usr_enrolment} e ON e.usr = a.owner';
+                        $selectclause .= ', e.college, e.course';
+                        $ontimeclause = true;
+                    }
                     $courseidgroups = explode(";", $filterval);
                     if (count($courseidgroups) == 1){
                         // one course submitted, could have multiple csv ids if selected by name
@@ -159,12 +173,12 @@ class ArtefactTypeBrowseSkillshare extends ArtefactType {
                         } else if (count($courseids) > 1 ){
                             foreach($courseids as $key => $id){
                                 if ($key == 0){
-                                    $andclause .= " AND ((e.course LIKE '%$id%'";
+                                    $andclause .= " AND (e.course LIKE '%$id%'";
                                 } else {
                                     $andclause .= " OR e.course LIKE '%$id%'";
                                 }
                                 if ($key == count($courseids)-1){
-                                    $andclause .= ')  AND e.usr = a.owner)';
+                                    $andclause .= ')';
                                 }
                             }
                         }
@@ -206,10 +220,6 @@ class ArtefactTypeBrowseSkillshare extends ArtefactType {
                                         }
                                     }
                                 }
-                                
-                                if ($key == count($courseidgroups)-1){
-                                    $andclause .= ' AND e.usr = a.owner)';
-                                }
                             }
                         }
                     }
@@ -221,8 +231,11 @@ class ArtefactTypeBrowseSkillshare extends ArtefactType {
         * The query checks for skillshare artefacts.
         */
         $skillshareitems = get_records_sql_array("
-                        $selectclause  $fromclause
-                        WHERE a.id = s.artefact
+                        $selectclause 
+                        $fromclause
+                        $joinclause
+                        $join2clause
+                        $whereclause
                         $andclause
                         GROUP BY a.id
                         ORDER BY a.mtime DESC
@@ -245,20 +258,14 @@ class ArtefactTypeBrowseSkillshare extends ArtefactType {
                 }
                 $images = get_records_sql_array('SELECT a.id, a.title, a.description, a.note
                                                 FROM {artefact} a
-                                                WHERE artefacttype = \'skillshareimage\'
+                                                WHERE artefacttype = ?
                                                 AND a.owner = ?
-                                                ORDER BY a.note, a.id', array($item->owner)
+                                                ORDER BY a.note, a.id', array('skillshareimage', $item->owner)
                                                 );
-                $where = 'artefact = ?';
-                $tagsarray = get_records_select_array('artefact_tag', $where, array($item->id));
+                $tagsarray = get_column('artefact_tag', 'tag', 'artefact', $item->id);
+                $tags = '';
                 if ($tagsarray) {
-                    $tagsonly = array();
-                    foreach ($tagsarray as $t) {
-                        $tagsonly[] = $t->tag;
-                    }
-                    $tags = implode(",", $tagsonly);
-                } else {
-                    $tags = '';
+                    $tags = implode(", ", $tagsarray);
                 }
 
                 $exampleimages = array();
@@ -342,16 +349,14 @@ class ArtefactTypeBrowseSkillshare extends ArtefactType {
             } // foreach
         }
 
-        $count = 0;
-        $allitems = get_records_sql_array("
-                                SELECT a.id
+        $count = count_records_sql("
+                                SELECT COUNT(distinct a.id)
                                 $fromclause
-                                WHERE a.id = s.artefact
+                                $joinclause
+                                $join2clause
+                                $whereclause
                                 $andclause
-                                GROUP BY a.id
-                                ORDER BY a.mtime DESC
                                 ", array());
-        $count = count($allitems);
 
         $items = array(
                 'count'  => $count,
